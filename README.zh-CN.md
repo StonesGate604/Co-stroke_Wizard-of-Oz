@@ -92,11 +92,11 @@ co-Stroke 位于以下研究方向的交叉位置：
 | JSON 加载 | 部分实现 | **Load** 当前只加载内置 `simple-house.json`，还不是任意文件选择器 |
 | JSON 导出 | 已实现 | 将当前会话下载为格式化的 `co-stroke.json` v0.1 数据 |
 | 本地 AI 续画 | 已实现 | 浏览器调用 `127.0.0.1:8787` 上的 Python/PyTorch 服务 |
-| 离线模拟续画 | 已实现 | 无法连接本地模型时使用简单回退笔画 |
+| 模型连接状态 | 已实现 | 服务失败或超时会显示错误；公开页面未配置模型时仅提供绘画与回放 |
 | 多模态关系笔画模型 v4.1 | 已实现并启用 | 笔画 Transformer + 部分画布 CNN；每回合贡献一条完整笔画 |
-| 人类优先上下文压缩 | 已实现 | 最多 24 个笔画单元；保护人类几何，只保留最近六条 AI 笔画 |
+| 人类优先上下文压缩 | 已实现 | 最多 24 个矢量笔画单元；优先保留人类笔画，剩余容量保留近期 AI；v4.1 视觉通道保留完整可见历史 |
 | 候选采样与重排序 | 内部已实现 | 每次采样 16 个候选并按几何连接/重叠评分；界面仍只显示选中结果 |
-| 自动化测试 | 已实现 | 14 项测试，覆盖旧模型、栅格通道、目标泄漏、梯度、重采样与上下文策略 |
+| 自动化测试 | 已实现 | 覆盖旧模型、栅格通道、目标泄漏、梯度、重采样、完整视觉历史、形状采样与重复抑制 |
 | Quick, Draw! 转换 CLI | 占位 | `scripts/convert_quickdraw.py` 尚未执行真正转换 |
 | 多候选选择界面 | 计划中 | 服务内部已经重排候选，但尚未向用户开放比较与人工选择 |
 | 持久化时间线分支 | 计划中 | v0.1 仍采用线性“截断未来”策略 |
@@ -196,7 +196,7 @@ branchPolicy: truncate-future-on-edit
 - 为独立静态前端提供 CORS；
 - 自动识别 checkpoint 类型；
 - 支持当前 v4.1 模型以及 v4/v3/v2/v1 checkpoint；
-- 服务不可用或响应无效时自动切换到客户端回退；
+- 支持独立 HTTPS 模型地址；服务不可用、响应无效或超时时显示错误；
 - 在界面中显示推理上下文统计信息。
 
 ## 系统架构
@@ -234,7 +234,7 @@ branchPolicy: truncate-future-on-edit
 | `src/timeline-player.js` | 播放、定位、Canvas 2D 渲染和逐笔变化事件 |
 | `src/timeline-view.js` | 时间线图标、滚动、拖动定位、当前光标和来源显示 |
 | `src/stroke-format.js` | 绘画/笔画创建、旧格式兼容、验证、截断和序列化 |
-| `src/ai-adapter.js` | 本地 HTTP adapter、响应验证和模拟回退 |
+| `src/ai-adapter.js` | 本地/远程 HTTP adapter、连接配置、响应验证和超时处理 |
 | `src/styles.css` | 布局与视觉样式 |
 
 ### Python 组件
@@ -254,11 +254,21 @@ branchPolicy: truncate-future-on-edit
 ### 环境要求
 
 - 支持 JavaScript Modules、Canvas 2D 和 Pointer Events 的现代浏览器；
-- Python 3；
+- Python 3.10 或更高版本；
 - 运行模型训练、测试或本地推理服务时需要 PyTorch；
 - 使用真实 AI 续画时需要训练好的 checkpoint。
 
 前端不需要构建步骤。Lucide 图标通过 jsDelivr 加载，因此图标加载需要网络；HTML 中仍保留文字回退内容。
+
+创建虚拟环境，并通过项目依赖清单安装 Python 依赖：
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\python.exe -m pip install --upgrade pip
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+```
+
+`requirements.txt` 有意使用可移植的 PyTorch 版本范围，而不绑定某个 CUDA wheel。如需 GPU 加速，应使用 PyTorch 官方安装器为当前电脑选择匹配的构建。
 
 ### 1. 不启动模型运行界面
 
@@ -276,9 +286,26 @@ http://localhost:8000/public/
 
 不要直接通过 `file://` 打开 `public/index.html`。前端使用 JavaScript Modules，并会请求内置示例文件，因此应通过 HTTP 提供服务。
 
-即使不启动模型服务，也可以绘画、擦除、回放、定位、撤销、清空和导出。此时按下 **AI Continue** 会使用模拟续画，以便测试交互循环。
+即使不启动模型服务，也可以绘画、擦除、回放、定位、撤销、清空和导出。AI 请求失败会显示错误，不会自动生成模拟笔画。
 
-### 2. 使用本地 v4.1 模型运行
+### GitHub Pages
+
+前端可独立托管在 GitHub Pages；Python/PyTorch 模型服务需要单独运行。
+公开服务地址在 `public/config.js` 的 `modelApiBaseUrl` 中配置。
+正式权重已发布在 GitHub v0.4.1 Release。部署流程及后续 Google Cloud 接口见
+[部署说明](docs/deployment.md)。
+
+### 2. 同步模型和可选训练数据
+
+Release checkpoint 和 Quick, Draw! 数据有意不提交到 Git。同步脚本会下载当前 v4.1 checkpoint 和猫类别数据集，并校验 checkpoint 的 SHA-256：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\sync_project_assets.ps1
+```
+
+如果只需要推理，可以添加 `-SkipQuickDraw`。下载私有 GitHub Release 资源需要 Git Credential Manager 中已有 GitHub 登录；添加 `-IncludeAllFormalCheckpoints` 可以同时获取历史 v3.1 和 v4.0.1 checkpoint。
+
+### 3. 使用本地 v4.1 模型运行
 
 保持静态服务器运行，在第二个终端中执行：
 
@@ -397,9 +424,9 @@ v4.1 响应中的上下文信息示例：
 
 本地开发服务器允许任意来源跨域访问（`Access-Control-Allow-Origin: *`）；公开部署前应重新评估这项配置。
 
-### 客户端回退行为
+### 客户端连接与失败处理
 
-以下情况会从 `LocalStrokeModelAdapter` 切换到 `MockStrokeModelAdapter`：HTTP 请求失败、服务返回非 2xx 状态，或响应不包含 `strokes` 数组。模拟 adapter 会在当前可见历史终点附近创建一条三个点组成的短粉色笔画。它只是界面回退，不是训练后的模型，也不会返回上下文压缩统计。
+公开页面连接 `public/config.js` 中的 HTTPS 服务；本地页面默认使用 `127.0.0.1:8787`。未配置公开服务时 AI 按钮不可用。请求失败、响应无效或超过 30 秒时显示错误并保留画布。`MockStrokeModelAdapter` 仍可供显式开发测试使用，但当前界面不会自动调用它。
 
 ## co-stroke.json v0.1
 
@@ -499,6 +526,8 @@ V4.1 使用两种同步表示预测下一条完整笔画：
 当前本地猫模型使用 69,872 张已识别的 Quick, Draw! 草图，包含 6,837,054 个参数，训练 12 个 epoch。融合主分支的验证损失达到 `-3.7397`，纯矢量 v4.0.1 约为 `-3.6114`。这个似然提升证明栅格画布提供了额外预测信息，但并不等同于视觉质量已经理想。人工测试中仍能看到重复耳朵/弧线，以及长时间 AI 自回归后的退化。
 
 详细设计与训练记录见 [`docs/v4.1-multimodal-architecture.md`](docs/v4.1-multimodal-architecture.md)。
+
+2026-09-07 的推理质量改进已加入：完整可见画布、容量内保留历史、无逐点随机扰动的形状采样，以及自交/重复筛选。没有重新训练或替换 checkpoint。固定样本对照和已知限制见 [`docs/stroke-quality-2026-09-07.md`](docs/stroke-quality-2026-09-07.md)。
 
 ## 连续 stroke-5 Transformer v3
 
@@ -759,6 +788,7 @@ v3 数据加载器会：
 co-Stroke/
 ├── README.md                              # 英文说明
 ├── README.zh-CN.md                        # 中文说明
+├── requirements.txt                       # Python 依赖清单
 ├── blog/
 │   └── 001-introduction.md                # 项目最初动机
 ├── data/
@@ -767,12 +797,13 @@ co-Stroke/
 │   ├── co-stroke-json-v0.1.md             # 当前格式设计
 │   ├── v4-architecture.md                  # 纯矢量关系模型 v4 设计
 │   ├── v4.1-multimodal-architecture.md    # 当前矢量/栅格设计与训练结果
-│   ├── stroke-format.md                    # 早期简化格式说明
+│   ├── stroke-format.md                    # 当前格式的精简参考
 │   └── conversations/                      # 开发过程记录
 ├── public/index.html                       # 浏览器应用外壳
 ├── schemas/co-stroke.schema.json           # JSON Schema draft 2020-12
 ├── scripts/
 │   ├── convert_quickdraw.py                # 占位转换器
+│   ├── sync_project_assets.ps1              # 下载并校验数据集/checkpoint
 │   ├── serve_stroke_model.py               # 本地推理 HTTP 服务
 │   ├── train_stroke_multimodal_v41.py      # 当前矢量 + 栅格 v4.1 模型
 │   ├── train_stroke_relational_v4.py       # 纯矢量关系 v4 基线
@@ -806,22 +837,22 @@ co-Stroke/
 - **没有候选结果比较。** 界面每次只请求一个续画结果。
 - **没有独立拒绝按钮。** 用户需要通过撤销或回退拒绝 AI 结果。
 - **尚未进行键盘与无障碍审查。** 键盘、屏幕阅读器、对比度和触屏体验仍需评估。
-- **擦除历史不是模型的语义输入。** v4/v4.1 会排除橡皮擦轨迹；模型只能看到剩余画笔几何，无法理解什么内容曾被删除。
+- **擦除支持有限。** v4.1 栅格通道按时间顺序合成擦除；矢量通道和几何评分仍保留原始画笔路径，尚未进行局部裁切。64 像素栅格也不等同于浏览器的精确渲染。
 - **压力只被记录，尚未使用。** 当前不影响渲染、生成或机械臂输出。
 - **新会话类别固定。** Clear 会创建 `cat` 会话，以配合当前猫类别模型。
 
 ### 模型与数据
 
 - **单类别 checkpoint。** 当前没有学习 category token。
-- **上下文有限。** v4.1 最多保留 24 个笔画单元和最近六条 AI 笔画。
+- **矢量上下文有限。** v4.1 最多保留 24 个笔画单元，人类优先；超过容量的笔画仍存在于完整画布栅格中。
 - **训练与交互存在分布差异。** Quick, Draw! 与缓慢、反复的人–AI 共创过程不同。
 - **缺少显式语义规划。** 栅格输入改善了验证似然，但当前没有猫部件词表、缺失部件目标或构图计划。
 - **长 rollout 仍会退化。** 模型连续使用自己的输出作为上下文时，仍会重复耳朵/弧线并生成穿越主体的长线。
-- **只有几何重排序。** 16 个候选会按连接、重叠、孤立和边界塌缩评分，但尚未评价可识别性、新颖性、近期笔画相似度或用户意图。
+- **只有几何重排序。** 16 个候选会按连接、重叠、自交、急剧折返、整笔重复和边界位置评分，允许内部独立小笔画；尚未评价语义部件完整性或用户意图。
 - **栅格上下文被压缩。** CNN 将空间特征图投影为单个上下文向量，尚未通过 cross-attention 暴露空间 token。
 - **缺少正式输出评价。** 已有验证 NLL，但还没有可识别性、多样性和人类偏好指标。
 - **数据集全部载入内存。** 较大数据集需要较多 RAM。
-- **没有资源安装器。** 数据和 checkpoint 不提交，且尚无自动下载/配置命令。
+- **资源存放在仓库外。** 数据和 checkpoint 不提交到 Git；`scripts/sync_project_assets.ps1` 可以下载并校验支持的资源，但需要网络，私有 Release 资源还需要 GitHub 凭据。
 
 ### 研究
 

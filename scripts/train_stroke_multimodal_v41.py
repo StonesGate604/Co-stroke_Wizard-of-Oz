@@ -267,16 +267,17 @@ class StrokeMultimodalV41(StrokeRelationalTransformer):
             context_mask,
             context_raster,
         )
+        conditioned_start = self.condition_shape_start(target_start)
         main = (
             self.predict_start(fused),
-            self.predict_shape(fused, target_start),
+            self.predict_shape(fused, conditioned_start),
             self.stop_head(fused).squeeze(-1),
         )
         # The auxiliary prediction prevents the high-capacity vector branch
         # from learning to ignore the new image representation.
         raster_aux = (
             self.predict_raster_start(raster),
-            self.predict_raster_shape(raster, target_start),
+            self.predict_raster_shape(raster, conditioned_start),
             self.raster_stop_head(raster).squeeze(-1),
         )
         return main, raster_aux
@@ -428,6 +429,12 @@ def initialize_from_v4(model: StrokeMultimodalV41, checkpoint_path: Path) -> Non
     )
 
 
+def cosine_lr_multiplier(epoch: int, epochs: int, min_ratio: float = 0.1) -> float:
+    """Cosine decay shared by every parameter group, preserving LR ratios."""
+    progress = min(max(epoch / max(epochs, 1), 0.0), 1.0)
+    return min_ratio + (1.0 - min_ratio) * 0.5 * (1.0 + math.cos(math.pi * progress))
+
+
 def parse_args() -> TrainConfig:
     parser = argparse.ArgumentParser(description="Train the co-Stroke multimodal v4.1 model.")
     parser.add_argument("--data", required=True, help="Path to a Quick, Draw! simplified .ndjson file.")
@@ -448,6 +455,7 @@ def parse_args() -> TrainConfig:
     parser.add_argument("--lr", type=float, default=2e-4)
     parser.add_argument("--weight-decay", type=float, default=0.01)
     parser.add_argument("--stop-loss-weight", type=float, default=0.25)
+    parser.add_argument("--start-condition-noise", type=float, default=0.015)
     parser.add_argument("--raster-size", type=int, default=64)
     parser.add_argument("--raster-aux-loss-weight", type=float, default=0.20)
     parser.add_argument("--pretrained-lr-scale", type=float, default=0.25)
@@ -475,6 +483,7 @@ def parse_args() -> TrainConfig:
         lr=args.lr,
         weight_decay=args.weight_decay,
         stop_loss_weight=args.stop_loss_weight,
+        start_condition_noise=args.start_condition_noise,
         raster_size=args.raster_size,
         raster_aux_loss_weight=args.raster_aux_loss_weight,
         pretrained_lr_scale=args.pretrained_lr_scale,
@@ -548,10 +557,12 @@ def main() -> None:
         )
     else:
         optimizer = torch.optim.AdamW(model.parameters(), lr=config.lr, weight_decay=config.weight_decay)
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+    # A shared multiplicative schedule preserves the warm-start LR ratio.
+    # CosineAnnealingLR accepts only one absolute eta_min, which caused the
+    # pretrained and new parameter groups to converge to the same LR.
+    scheduler = torch.optim.lr_scheduler.LambdaLR(
         optimizer,
-        T_max=max(config.epochs, 1),
-        eta_min=config.lr * 0.1,
+        lr_lambda=lambda epoch: cosine_lr_multiplier(epoch, config.epochs),
     )
     scaler = torch.amp.GradScaler(device.type, enabled=amp_enabled)
     out_dir = Path(config.out_dir)

@@ -1,5 +1,6 @@
 ﻿import { requestAIContinuation } from "./ai-adapter.js";
 import { DrawingInputController } from "./drawing-input.js";
+import { resolveModelEndpoint } from "./ai-adapter.js";
 import { createEmptyDrawing, createStroke, normalizeDrawing, serializeDrawing, trimDrawingToStep } from "./stroke-format.js";
 import { TimelinePlayer } from "./timeline-player.js";
 import { TimelineView } from "./timeline-view.js";
@@ -39,7 +40,10 @@ const dom = {
 
 const state = {
   currentTool: "pen",
-  drawing: createCatSession()
+  drawing: createCatSession(),
+  modelEndpoint: null,
+  aiBusy: false,
+  revision: 0
 };
 
 const player = new TimelinePlayer(dom.canvas);
@@ -65,13 +69,33 @@ new DrawingInputController(dom.canvas, {
     player.pause();
     state.drawing = trimDrawingToStep(state.drawing, player.step);
     state.drawing.strokes.push(buildHumanStroke(points));
-    setContextMessage("Human stroke added — ready to continue", false);
+    state.revision += 1;
+    setReadyMessage("Human stroke added — ready to continue");
     player.setDrawing(state.drawing, state.drawing.strokes.length);
   }
 });
 
 bindControls();
 player.load(state.drawing);
+initializeAIConnection();
+
+function initializeAIConnection() {
+  try {
+    state.modelEndpoint = resolveModelEndpoint();
+    setReadyMessage("Ready for AI — add a stroke to begin");
+  } catch (error) {
+    setContextMessage(error.message, true);
+  }
+  updateAIButton();
+}
+
+function updateAIButton() {
+  dom.aiStepButton.disabled = state.aiBusy || !state.modelEndpoint;
+}
+
+function setReadyMessage(message) {
+  setContextMessage(state.modelEndpoint ? message : "AI is not connected yet. Drawing and replay are available.", !state.modelEndpoint);
+}
 
 function bindControls() {
   dom.loadExampleButton.addEventListener("click", loadExample);
@@ -87,29 +111,34 @@ function bindControls() {
 }
 
 async function loadExample() {
-  const response = await fetch("../data/examples/simple-house.json");
+  const response = await fetch(new URL("../data/examples/simple-house.json", import.meta.url));
   const data = await response.json();
   state.drawing = normalizeDrawing(data);
-  setContextMessage("Example loaded — context not packed yet", false);
+  state.revision += 1;
+  setReadyMessage("Example loaded — ready to continue");
   player.load(state.drawing);
 }
 
 async function addAIStroke() {
+  if (state.aiBusy || !state.modelEndpoint) return;
   player.pause();
-  state.drawing = trimDrawingToStep(state.drawing, player.step);
 
-  if (countTrailingAIStrokes(state.drawing.strokes) >= MAX_CONSECUTIVE_AI_STROKES) {
+  if (countTrailingAIStrokes(state.drawing.strokes.slice(0, player.step)) >= MAX_CONSECUTIVE_AI_STROKES) {
     setContextMessage("AI paused after 12 strokes — add a human stroke", true);
     return;
   }
 
-  dom.aiStepButton.disabled = true;
+  state.aiBusy = true;
+  updateAIButton();
   setContextMessage("Packing human-priority context…", false);
+  const requestDrawing = state.drawing;
+  const requestStep = player.step;
+  const requestRevision = state.revision;
 
   try {
     const response = await requestAIContinuation({
-      drawing: state.drawing,
-      currentStep: player.step,
+      drawing: requestDrawing,
+      currentStep: requestStep,
       options: {
         maxStrokes: 1,
         maxPointsPerStroke: 32,
@@ -123,20 +152,31 @@ async function addAIStroke() {
       }
     });
 
+    if (state.drawing !== requestDrawing || state.revision !== requestRevision || player.step !== requestStep) {
+      setReadyMessage("Drawing changed — request AI again to continue");
+      return;
+    }
     updateContextMessage(response.context, response.model);
     if (!response.strokes.length) return;
 
+    state.drawing = trimDrawingToStep(state.drawing, requestStep);
     state.drawing.strokes.push(...response.strokes);
+    state.revision += 1;
     state.drawing.updatedAt = new Date().toISOString();
     player.setDrawing(state.drawing, state.drawing.strokes.length);
+  } catch (error) {
+    if (state.drawing === requestDrawing && state.revision === requestRevision && player.step === requestStep) {
+      setContextMessage(error.message, true);
+    }
   } finally {
-    dom.aiStepButton.disabled = false;
+    state.aiBusy = false;
+    updateAIButton();
   }
 }
 
 function updateContextMessage(context, model) {
   if (!context) {
-    setContextMessage(`Context unavailable — ${model?.name ?? "mock model"}`, true);
+    setContextMessage(`Context unavailable — ${model?.name ?? "AI service"}`, true);
     return;
   }
 
@@ -182,13 +222,16 @@ function buildHumanStroke(points) {
 function undoStroke() {
   player.pause();
   state.drawing = trimDrawingToStep(state.drawing, Math.max(0, state.drawing.strokes.length - 1));
+  state.revision += 1;
+  setReadyMessage("Stroke undone — ready to continue");
   player.setDrawing(state.drawing, state.drawing.strokes.length);
 }
 
 function clearDrawing() {
   player.pause();
   state.drawing = createCatSession();
-  setContextMessage("Context: waiting for a drawing", false);
+  state.revision += 1;
+  setReadyMessage("Context: waiting for a drawing");
   player.load(state.drawing);
 }
 

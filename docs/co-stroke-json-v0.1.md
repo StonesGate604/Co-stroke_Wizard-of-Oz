@@ -102,8 +102,15 @@ type StrokeContinuationRequest = {
   currentStep: number;
   options: {
     maxStrokes: number;
+    maxPointsPerStroke?: number;
+    steps?: number;
     temperature?: number;
     categoryHint?: string;
+    seed?: number;
+    style?: {
+      color?: string;
+      width?: number;
+    };
   };
 };
 
@@ -112,11 +119,13 @@ type StrokeContinuationResponse = {
   model: {
     name: string;
     version?: string;
+    type?: string;
   };
+  context?: Record<string, unknown>;
 };
 ```
 
-The first frontend prototype uses a mock adapter, but the same interface can later call a local Python server, a hosted model endpoint, or a browser-side ONNX model.
+The current frontend first calls the local Python service at `http://127.0.0.1:8787/continue`. The service auto-detects supported checkpoints, including the current multimodal v4.1 model, and returns one generated stroke plus model/context metadata. If the request fails or the response is invalid, the browser falls back to a small mock continuation so the interaction loop remains usable. A hosted endpoint or browser-side model can implement the same contract later.
 
 ## Robot Bridge Notes
 

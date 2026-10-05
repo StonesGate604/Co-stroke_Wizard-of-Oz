@@ -95,11 +95,11 @@ This repository currently contains a working research prototype, not a completed
 | JSON loading | Partially implemented | **Load** currently loads the bundled `simple-house.json` example, not an arbitrary file picker |
 | JSON export | Implemented | Downloads the current session as formatted `co-stroke.json` v0.1 data |
 | Local AI continuation | Implemented | Browser calls a local Python/PyTorch server at `127.0.0.1:8787` |
-| Offline/mock continuation | Implemented | A simple fallback appears if the local model cannot be reached |
+| Model connection status | Implemented | Failures and timeouts are shown; an unconfigured public site supports drawing and replay |
 | Multimodal relational model v4.1 | Implemented and active | Stroke Transformer + partial-canvas CNN; one complete stroke per turn |
-| Human-priority context packing | Implemented | Up to 24 stroke units; human geometry protected and only six recent AI strokes retained |
+| Human-priority context packing | Implemented | Up to 24 vector strokes; humans first, recent AI fills remaining capacity; v4.1 raster retains the complete visible history |
 | Candidate sampling/reranking | Implemented internally | Samples 16 candidates and applies geometric connection/overlap scoring; the UI still shows only the selected result |
-| Automated tests | Implemented | 14 tests covering earlier models, raster channels, target-leakage prevention, gradients, resampling, and context policies |
+| Automated tests | Implemented | Covers earlier models, raster channels, target-leakage prevention, gradients, resampling, full visual history, shape sampling, and repeat suppression |
 | Quick, Draw! converter CLI | Placeholder | `scripts/convert_quickdraw.py` does not yet perform conversion |
 | Multiple-candidate UI | Planned | The service reranks candidates internally; comparison and human selection are not yet exposed |
 | Persistent branches | Planned | v0.1 uses a linear truncate-future policy |
@@ -199,7 +199,7 @@ The UI counts consecutive AI-authored strokes at the end of the visible history.
 - CORS headers for the separately served static frontend;
 - automatic checkpoint-type detection;
 - support for the current v4.1 model and v4/v3/v2/v1 checkpoints;
-- client-side fallback when the service is absent or returns an invalid response;
+- configurable HTTPS model service with visible errors for unavailable, invalid, or timed-out responses;
 - inference context statistics displayed in the UI.
 
 ## System architecture
@@ -239,7 +239,7 @@ The UI counts consecutive AI-authored strokes at the end of the visible history.
 | `src/timeline-player.js` | Playback, seeking, Canvas 2D rendering, and stroke-by-stroke change events |
 | `src/timeline-view.js` | Timeline icons, scrolling, scrubbing, active cursor, and provenance display |
 | `src/stroke-format.js` | Drawing/stroke construction, legacy normalization, validation, trimming, and serialization |
-| `src/ai-adapter.js` | Local HTTP adapter, response validation, and mock fallback |
+| `src/ai-adapter.js` | Local/remote HTTP adapter, connection settings, response validation, and timeouts |
 | `src/styles.css` | Layout and visual design |
 
 ### Python components
@@ -259,11 +259,21 @@ The UI counts consecutive AI-authored strokes at the end of the visible history.
 ### Prerequisites
 
 - a modern browser with JavaScript modules, Canvas 2D, and Pointer Events;
-- Python 3;
+- Python 3.10 or newer;
 - PyTorch for model training, tests, or the local inference service;
 - a trained checkpoint if real AI continuation is required.
 
 The frontend has no build step. Lucide icons are loaded from jsDelivr, so icons require network access; text fallbacks remain in the markup.
+
+Create a virtual environment and install the Python dependency from the project manifest:
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\python.exe -m pip install --upgrade pip
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+```
+
+`requirements.txt` intentionally declares a portable PyTorch version range rather than a CUDA-specific wheel. If GPU acceleration is required, install the build selected for that machine by the official PyTorch installer.
 
 ### 1. Run the interface without the model
 
@@ -281,9 +291,27 @@ http://localhost:8000/public/
 
 Do not open `public/index.html` directly as a `file://` URL. The frontend uses JavaScript modules and fetches the bundled example, so it should be served over HTTP.
 
-You can draw, erase, replay, seek, undo, clear, and export without starting the model server. If **AI Continue** cannot reach the local model, the adapter returns a small mock continuation so the interaction loop remains testable.
+You can draw, erase, replay, seek, undo, clear, and export without starting the model server. Failed AI requests show an error and never automatically produce mock strokes.
 
-### 2. Run with the local v4.1 model
+### GitHub Pages
+
+The frontend can be hosted independently on GitHub Pages; the Python/PyTorch
+model service runs separately. Set its public HTTPS base URL in
+`public/config.js` (`modelApiBaseUrl`). The formal weights are already available
+in the v0.4.1 GitHub Release. See [deployment instructions](docs/deployment.md)
+for Pages publishing and the interface for a future Google Cloud service.
+
+### 2. Sync the model and optional training data
+
+The release checkpoint and Quick, Draw! data are intentionally excluded from Git. The synchronization script downloads the current v4.1 checkpoint, downloads the cat dataset, and verifies the checkpoint SHA-256:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\sync_project_assets.ps1
+```
+
+Use `-SkipQuickDraw` when only inference is needed. Private GitHub release assets require an existing GitHub login in Git Credential Manager. Pass `-IncludeAllFormalCheckpoints` to retrieve the historical v3.1 and v4.0.1 checkpoints as well.
+
+### 3. Run with the local v4.1 model
 
 Keep the static server running. In a second terminal:
 
@@ -402,9 +430,9 @@ The v4.1 response includes context fields such as:
 
 The server enables permissive CORS (`Access-Control-Allow-Origin: *`) for local development; review this configuration before public deployment.
 
-### Client fallback behavior
+### Client connection and failure handling
 
-`LocalStrokeModelAdapter` falls back to `MockStrokeModelAdapter` when the HTTP request fails, the service returns a non-2xx status, or the response lacks a `strokes` array. The mock creates a short three-point pink stroke near the visible endpoint. It is an interface fallback, not a learned model, and does not return context statistics.
+Public pages use the HTTPS service configured in `public/config.js`; local pages default to `127.0.0.1:8787`. Without a public service address, the AI button stays disabled. Failed, invalid, or timed-out requests show an error and preserve the drawing. Requests time out after 30 seconds. `MockStrokeModelAdapter` remains available for explicit development tests but is never automatically used by the interface.
 
 ## co-stroke.json v0.1
 
@@ -783,6 +811,7 @@ Browser interaction, schema-validator integration, visual regression, and end-to
 co-Stroke/
 ├── README.md
 ├── README.zh-CN.md                        # Simplified Chinese documentation
+├── requirements.txt                       # Python dependency manifest
 ├── blog/
 │   └── 001-introduction.md              # Original project motivation
 ├── data/
@@ -791,12 +820,13 @@ co-Stroke/
 │   ├── co-stroke-json-v0.1.md           # Current format design
 │   ├── v4-architecture.md                # Vector relational v4 design
 │   ├── v4.1-multimodal-architecture.md  # Current vector/raster design and results
-│   ├── stroke-format.md                  # Earlier compact format note
+│   ├── stroke-format.md                  # Concise current-format reference
 │   └── conversations/                    # Development notes
 ├── public/index.html                     # Browser shell
 ├── schemas/co-stroke.schema.json         # JSON Schema draft 2020-12
 ├── scripts/
 │   ├── convert_quickdraw.py              # Placeholder converter
+│   ├── sync_project_assets.ps1            # Download and verify datasets/checkpoints
 │   ├── serve_stroke_model.py             # Local inference HTTP service
 │   ├── train_stroke_multimodal_v41.py    # Current vector + raster v4.1 model
 │   ├── train_stroke_relational_v4.py     # Vector-only relational v4 baseline
@@ -830,22 +860,22 @@ Local-only directories commonly include `data/quickdraw/`, `runs/`, and `.venv/`
 - **No candidate comparison.** The UI requests one continuation at a time.
 - **No dedicated rejection control.** Users reject through undo or rewind.
 - **No keyboard/accessibility audit.** Keyboard, screen-reader, contrast, and touch support need evaluation.
-- **Eraser history is not semantic model input.** V4/v4.1 exclude eraser paths from context; the model sees only the remaining pen geometry and cannot reason about what was removed.
+- **Partial eraser support.** V4.1 composites erasing in timeline order in the raster channels. Vector tokens and geometric scoring still retain original pen paths without clipping; the 64-pixel raster is also an approximation of browser rendering.
 - **Pressure is recorded but unused.** It does not affect rendering, generation, or robot output.
 - **Category is fixed for new sessions.** Clear creates a `cat` session for the cat-only checkpoint.
 
 ### Model and data
 
 - **Single-category checkpoint.** There is no learned category token.
-- **Limited context.** V4.1 retains at most 24 stroke units and at most six recent AI strokes.
+- **Limited vector context.** V4.1 retains at most 24 vector strokes, prioritizing humans; omitted strokes remain in the full visible raster.
 - **Train–interaction mismatch.** Quick, Draw! differs from slow, iterative co-creation.
 - **No explicit semantic planning.** Raster input improves validation likelihood, but there is no cat-part vocabulary, missing-part objective, or composition plan.
 - **Long rollout degradation.** Repeated ear/arc motifs and crossing lines still appear when the model repeatedly conditions on its own output.
-- **Geometric reranking only.** Sixteen candidates are scored for connection, overlap, isolation, and boundary collapse, but not recognizability, novelty, recent-stroke similarity, or user intent.
+- **Geometric reranking only.** Sixteen candidates are scored for connection, overlap, crossings, reversals, whole-stroke repetition, and boundary position. Detached interior details are allowed; semantic part completeness and user intent are not evaluated.
 - **Compressed raster context.** The CNN projects its spatial feature map into one context vector rather than exposing spatial tokens through cross-attention.
 - **No formal output evaluation.** Validation NLL exists, but recognizability, diversity, and human preference metrics do not.
 - **In-memory dataset.** Large datasets can require substantial RAM.
-- **No artifact installer.** Data and checkpoints are excluded from Git without automated download/setup.
+- **Artifacts are external.** Data and checkpoints are excluded from Git; `scripts/sync_project_assets.ps1` downloads and verifies the supported assets but requires network access and GitHub credentials for private release assets.
 
 ### Research
 

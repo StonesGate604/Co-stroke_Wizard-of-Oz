@@ -33,10 +33,10 @@ git pull --ff-only
 ```powershell
 python -m venv .venv
 .\.venv\Scripts\python.exe -m pip install --upgrade pip
-.\.venv\Scripts\python.exe -m pip install torch
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
 ```
 
-若电脑有 NVIDIA GPU，应根据该电脑的 CUDA 环境从 PyTorch 官方安装页选择匹配的安装命令，不要盲目沿用旧电脑的 CUDA wheel。
+`requirements.txt` 使用可移植的 PyTorch 版本范围，不绑定某个 CUDA wheel。若电脑有 NVIDIA GPU，应根据该电脑的 CUDA 环境从 PyTorch 官方安装页选择匹配的安装命令，不要盲目沿用旧电脑的 CUDA wheel。
 
 ### 3. 下载 Quick, Draw! 猫类别训练数据
 

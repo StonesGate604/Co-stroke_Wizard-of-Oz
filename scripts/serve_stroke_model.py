@@ -57,6 +57,8 @@ from train_stroke_relational_v4 import (  # noqa: E402
     StrokeRelationalTransformer,
     TrainConfig as StrokeRelationalTrainConfig,
     co_stroke_to_v4_tensor,
+    relative_context_order,
+    resample_stroke,
     sample_v4_stroke,
 )
 from train_stroke_multimodal_v41 import (  # noqa: E402
@@ -75,7 +77,7 @@ V3_HUMAN_POINTS_PER_STROKE = 16
 V3_AI_POINTS_PER_STROKE = 12
 V4_CONTEXT_POLICY = "stroke-relational-human-priority-v4.0.1"
 V41_CONTEXT_POLICY = "stroke-multimodal-human-priority-v4.1"
-V4_RECENT_AI_STROKES = 6
+V4_SAMPLING_POLICY = "stroke-shape-quality-v1"
 V4_CANDIDATES = 16
 
 
@@ -339,6 +341,8 @@ class Stroke5TransformerRuntime:
 class StrokeRelationalV4Runtime:
     """Runtime for the stroke-level relational completion model v4."""
 
+    sampling_policy = V4_SAMPLING_POLICY
+
     def __init__(self, checkpoint: dict[str, Any], checkpoint_path: Path, device_name: str) -> None:
         checkpoint_config = checkpoint.get("config", {})
         allowed = {field.name for field in fields(StrokeRelationalTrainConfig)}
@@ -362,6 +366,7 @@ class StrokeRelationalV4Runtime:
         visible_stroke_count: int,
         canvas_width: float,
         canvas_height: float,
+        raster_strokes: list[dict[str, Any]] | None = None,
     ) -> dict[str, torch.Tensor]:
         return make_v4_model_inputs(
             context_strokes,
@@ -412,6 +417,7 @@ class StrokeRelationalV4Runtime:
             visible_stroke_count=len(visible_strokes),
             canvas_width=canvas_width,
             canvas_height=canvas_height,
+            raster_strokes=visible_strokes,
         )
 
         reference_strokes = [
@@ -447,7 +453,7 @@ class StrokeRelationalV4Runtime:
                 **metrics,
             })
 
-        best = max(candidates, key=lambda candidate: candidate["score"])
+        best = rank_v4_candidates(candidates)
         color = (style or {}).get("color", "#ff44aa")
         width = (style or {}).get("width", 4)
         stroke = make_stroke(
@@ -461,10 +467,16 @@ class StrokeRelationalV4Runtime:
         stroke["metadata"].update({
             "candidateCount": candidate_count,
             "candidateScore": round(float(best["score"]), 6),
+            "candidateLogDensity": round(float(best["confidence"]), 6),
+            "candidateConfidenceZ": round(float(best["confidenceZ"]), 6),
             "overlap": round(float(best["overlap"]), 6),
             "humanOverlap": round(float(best["humanOverlap"]), 6),
             "endpointDistance": round(float(best["endpointDistance"]), 6),
             "nearestDistance": round(float(best["nearestDistance"]), 6),
+            "selfIntersections": int(best["selfIntersections"]),
+            "backtracks": int(best["backtracks"]),
+            "repeatDistance": round(float(best["repeatDistance"]), 6),
+            "samplingPolicy": self.sampling_policy,
         })
         context_stats.update({
             "candidateCount": candidate_count,
@@ -473,6 +485,8 @@ class StrokeRelationalV4Runtime:
             "selectedEndpointDistance": round(float(best["endpointDistance"]), 6),
             "selectedNearestDistance": round(float(best["nearestDistance"]), 6),
             "canvasMapping": "letterbox-square-v1",
+            "samplingPolicy": self.sampling_policy,
+            "rasterPolicy": "full-visible-history-v1" if self.model_type == "stroke-multimodal-v4.1" else None,
         })
         return {
             "model": {"name": self.name, "version": self.version, "type": self.model_type},
@@ -507,6 +521,7 @@ class StrokeMultimodalV41Runtime(StrokeRelationalV4Runtime):
         visible_stroke_count: int,
         canvas_width: float,
         canvas_height: float,
+        raster_strokes: list[dict[str, Any]] | None = None,
     ) -> dict[str, torch.Tensor]:
         inputs = super().make_model_inputs(
             context_strokes,
@@ -514,11 +529,13 @@ class StrokeMultimodalV41Runtime(StrokeRelationalV4Runtime):
             canvas_width=canvas_width,
             canvas_height=canvas_height,
         )
-        raster = rasterize_context(
-            inputs["context_points"][0],
-            inputs["context_authors"][0],
-            inputs["context_order"][0],
+        raster = rasterize_visible_drawing(
+            context_strokes if raster_strokes is None else raster_strokes,
+            points_per_stroke=self.config.points_per_stroke,
             raster_size=self.config.raster_size,
+            canvas_width=canvas_width,
+            canvas_height=canvas_height,
+            device=self.device,
         )
         inputs["context_raster"] = raster.unsqueeze(0)
         return inputs
@@ -802,14 +819,17 @@ def pack_v4_context(
 
     human_entries = [entry for entry in usable if entry["author"] != "ai"]
     ai_entries = [entry for entry in usable if entry["author"] == "ai"]
-    selected_ai = ai_entries[-min(V4_RECENT_AI_STROKES, max_strokes):]
-    human_capacity = max(0, max_strokes - len(selected_ai))
+    if max_strokes < 0:
+        raise ValueError("max_strokes must be non-negative")
+    human_capacity = max_strokes
     if human_capacity <= 0:
         selected_human = []
     elif len(human_entries) <= human_capacity:
         selected_human = human_entries
     else:
         selected_human = evenly_spaced_entries(human_entries, human_capacity)
+    ai_capacity = max_strokes - len(selected_human)
+    selected_ai = ai_entries[-ai_capacity:] if ai_capacity else []
     selected = sorted([*selected_human, *selected_ai], key=lambda entry: entry["index"])
 
     packed: list[dict[str, Any]] = []
@@ -838,6 +858,51 @@ def pack_v4_context(
         "compacted": len(selected) < len(usable) or ignored_erasers > 0,
     }
     return packed, stats
+
+
+def rasterize_visible_drawing(
+    strokes: list[dict[str, Any]],
+    *,
+    points_per_stroke: int,
+    raster_size: int,
+    canvas_width: float,
+    canvas_height: float,
+    device: torch.device,
+) -> torch.Tensor:
+    """Keep the visual history even when the vector token budget is full.
+
+    Erasers remove ink from all provenance channels in timeline order. Vector
+    tokens retain original stroke geometry; only this visual view is composited.
+    """
+    usable = [s for s in strokes if len(s.get("points", [])) >= 2]
+    inputs = make_v4_model_inputs(
+        usable, visible_stroke_count=len(usable), points_per_stroke=points_per_stroke,
+        canvas_width=canvas_width, canvas_height=canvas_height, device=device,
+    )
+    points, authors, order = (inputs[key][0] for key in
+        ("context_points", "context_authors", "context_order"))
+    if all(s.get("tool", "pen") == "pen" for s in usable):
+        return rasterize_context(points, authors, order, raster_size=raster_size)
+    canvas = points.new_zeros((3, raster_size, raster_size))
+    last_human = next((i for i in reversed(range(len(usable)))
+        if usable[i].get("tool", "pen") == "pen" and stroke_author_type(usable[i]) != "ai"), -1)
+    for i, stroke in enumerate(usable):
+        mask = rasterize_context(points[i:i+1], authors[i:i+1], order[i:i+1],
+            raster_size=raster_size)[0]
+        if stroke.get("tool", "pen") == "eraser":
+            width = max(0.0, float(stroke.get("style", {}).get("width", 10)))
+            radius = min(raster_size, max(1, math.ceil(width * raster_size / max(canvas_width, canvas_height) / 2)))
+            if radius > 1:
+                mask = F.max_pool2d(mask[None, None], kernel_size=2 * radius - 1,
+                    stride=1, padding=radius - 1)[0, 0]
+            canvas *= 1.0 - mask.unsqueeze(0)
+        elif stroke.get("tool", "pen") == "pen":
+            canvas[0] = torch.maximum(canvas[0], mask)
+            if stroke_author_type(stroke) == "ai":
+                canvas[1] = torch.maximum(canvas[1], mask)
+            if i == last_human:
+                canvas[2] = torch.maximum(canvas[2], mask)
+    return canvas
 
 
 def drawing_canvas_size(drawing: dict[str, Any]) -> tuple[float, float]:
@@ -943,11 +1008,8 @@ def make_v4_model_inputs(
             V4_AUTHOR_AI if stroke_author_type(stroke) == "ai" else V4_AUTHOR_HUMAN
             for stroke in context_strokes
         ]], dtype=torch.long, device=device)
-        denominator = max(visible_stroke_count - 1, 1)
-        order = torch.tensor([[
-            float(stroke.get("_contextIndex", index)) / denominator
-            for index, stroke in enumerate(context_strokes)
-        ]], dtype=torch.float32, device=device)
+        del visible_stroke_count  # Full drawing length is unknowable at inference.
+        order = relative_context_order(len(context_strokes)).unsqueeze(0).to(device)
         mask = torch.ones((1, len(context_strokes)), dtype=torch.bool, device=device)
     else:
         points = torch.zeros((1, 0, points_per_stroke, 2), dtype=torch.float32, device=device)
@@ -991,6 +1053,20 @@ def tensor_to_co_points(
     return converted
 
 
+def rank_v4_candidates(candidates: list[dict[str, Any]]) -> dict[str, Any]:
+    """Shared by serving and evaluation; densities only rank within a request."""
+    if not candidates:
+        raise ValueError("At least one candidate is required")
+    confidence_mean = sum(c["confidence"] for c in candidates) / len(candidates)
+    variance = sum((c["confidence"] - confidence_mean) ** 2 for c in candidates) / len(candidates)
+    scale = max(math.sqrt(variance), 1e-6)
+    for candidate in candidates:
+        z = clamp((candidate["confidence"] - confidence_mean) / scale, -2.0, 2.0)
+        candidate["confidenceZ"] = z
+        candidate["score"] = candidate["geometryScore"] + 0.12 * z
+    return max(candidates, key=lambda candidate: candidate["score"])
+
+
 def score_v4_candidate(
     candidate: list[dict[str, float]],
     references: list[dict[str, Any]],
@@ -1006,35 +1082,93 @@ def score_v4_candidate(
         for previous, point in zip(candidate, candidate[1:])
     )
     boundary_fraction = sum(
-        point["x"] <= 0.001 or point["x"] >= 0.999 or point["y"] <= 0.001 or point["y"] >= 0.999
+        point["x"] <= 0.012 or point["x"] >= 0.988 or point["y"] <= 0.012 or point["y"] >= 0.988
         for point in candidate
     ) / max(len(candidate), 1)
-    short_penalty = max(0.0, 0.04 - length) * 30.0
+    # Small detached marks inside the drawing can be eyes/noses. Only suppress
+    # near-degenerate dots, rather than requiring every contribution to connect.
+    short_penalty = max(0.0, 0.006 - length) * 30.0
     trace_penalty = max(0.0, overlap - 0.22) * 3.2
     human_trace_penalty = max(0.0, human_overlap - 0.25) * 4.0
-    isolation_penalty = max(0.0, nearest_distance - 0.12) * 5.0
+    reference_points = [p for s in references for p in s.get("points", [])]
+    inside = False
+    if reference_points and candidate:
+        min_x, max_x = min(p["x"] for p in reference_points), max(p["x"] for p in reference_points)
+        min_y, max_y = min(p["y"] for p in reference_points), max(p["y"] for p in reference_points)
+        inside = all(min_x <= p["x"] <= max_x and min_y <= p["y"] <= max_y for p in candidate)
+    isolation_penalty = 0.0 if inside else max(0.0, nearest_distance - 0.12) * 5.0
     composition_penalty = max(0.0, center_distance - 0.32) * 2.0
-    endpoint_connection_reward = max(0.0, 1.0 - endpoint_distance / 0.055) * 0.25
-    proximity_reward = max(0.0, 1.0 - nearest_distance / 0.08) * 0.20
-    score = (
-        0.12 * confidence
-        + endpoint_connection_reward
+    endpoint_connection_reward = max(0.0, 1.0 - endpoint_distance / 0.055) * 0.10
+    proximity_reward = max(0.0, 1.0 - nearest_distance / 0.08) * 0.08
+    quality = stroke_shape_quality(candidate)
+    shape_penalty = min(quality["selfIntersections"], 6) * 0.12 + quality["backtracks"] * 0.08
+    # Closed outlines may be long; reject only extreme wandering, not all long strokes.
+    shape_penalty += max(0.0, length - 2.5) * 0.35
+    repeat_distance = stroke_repeat_distance(candidate, references)
+    repeat_penalty = max(0.0, 1.0 - repeat_distance / 0.04) * 0.9
+    geometry_score = (
+        endpoint_connection_reward
         + proximity_reward
         - trace_penalty
         - human_trace_penalty
         - isolation_penalty
         - composition_penalty
-        - boundary_fraction
+        - 2.0 * boundary_fraction
         - short_penalty
+        - shape_penalty
+        - repeat_penalty
     )
+    score = geometry_score + 0.12 * confidence
     return {
         "score": score,
+        "geometryScore": geometry_score,
         "overlap": overlap,
         "humanOverlap": human_overlap,
         "endpointDistance": endpoint_distance,
         "nearestDistance": nearest_distance,
         "centerDistance": center_distance,
+        "repeatDistance": repeat_distance,
+        **quality,
     }
+
+
+def stroke_repeat_distance(
+    candidate: list[dict[str, float]], references: list[dict[str, Any]],
+) -> float:
+    """Compare whole AI strokes, preserving position and ignoring direction.
+
+    A single crossing/connection must not count as a repeated stroke. Both
+    directions of the point-set distance contribute to this penalty.
+    """
+    previous = [s for s in references if stroke_author_type(s) == "ai" and len(s.get("points", [])) >= 2]
+    if len(candidate) < 2 or not previous:
+        return 1.0
+    query = resample_stroke([(p["x"], p["y"]) for p in candidate], 32)
+    targets = torch.stack([resample_stroke([(p["x"], p["y"]) for p in s["points"]], 32) for s in previous])
+    distances = torch.linalg.vector_norm(query[None, :, None] - targets[:, None], dim=-1)
+    symmetric = (distances.amin(dim=1).mean(dim=1) + distances.amin(dim=2).mean(dim=1)) * 0.5
+    return float(symmetric.min())
+
+
+def stroke_shape_quality(points: list[dict[str, float]]) -> dict[str, float]:
+    """Detect crossings and abrupt reversals without penalizing smooth loops."""
+    xy = [(p["x"], p["y"]) for p in points]
+    segments = list(zip(xy, xy[1:]))
+    def cross(a: tuple, b: tuple, c: tuple) -> float:
+        return (b[0]-a[0])*(c[1]-a[1]) - (b[1]-a[1])*(c[0]-a[0])
+    intersections = 0
+    for i, (a, b) in enumerate(segments):
+        for c, d in segments[i+2:]:
+            ab_c, ab_d, cd_a, cd_b = cross(a,b,c), cross(a,b,d), cross(c,d,a), cross(c,d,b)
+            if ab_c * ab_d < -1e-12 and cd_a * cd_b < -1e-12:
+                intersections += 1
+    backtracks = 0
+    for a, b, c in zip(xy, xy[1:], xy[2:]):
+        ux, uy, vx, vy = b[0]-a[0], b[1]-a[1], c[0]-b[0], c[1]-b[1]
+        product = math.hypot(ux, uy) * math.hypot(vx, vy)
+        if product > 1e-8 and (ux*vx + uy*vy) / product < -0.35:
+            backtracks += 1
+    return {"selfIntersections": float(intersections), "backtracks": float(backtracks)}
 
 
 def stroke_distance_metrics(
@@ -1365,6 +1499,7 @@ def make_handler(
                         "checkpoint": str(runtime.checkpoint_path),
                         "device": str(runtime.device),
                         "context_policy": getattr(runtime, "context_policy", None),
+                        "sampling_policy": getattr(runtime, "sampling_policy", None),
                     }
                 )
                 return

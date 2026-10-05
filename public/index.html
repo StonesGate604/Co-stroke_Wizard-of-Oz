@@ -51,8 +51,8 @@
     <section class="panel-section">
       <div class="section-title">AI Continuation</div>
       <button class="action-btn" id="aiStepButton"><i data-lucide="sparkles"></i> AI Continue</button>
-      <div class="context-stat" id="contextStat">Context: waiting for a drawing</div>
-      <div class="hint-text">Human strokes are prioritized; only recent AI strokes are kept in the model context.</div>
+      <div class="context-stat" id="contextStat" role="status" aria-live="polite">Checking AI connection…</div>
+      <div class="hint-text">Your strokes take priority. Add a stroke to guide the next AI contribution.</div>
     </section>
   </aside>
 
@@ -68,6 +68,7 @@
     </div>
   </section>
 
+  <script src="./config.js"></script>
   <script type="module" src="../src/app.js"></script>
 </body>
 </html>

@@ -1,5 +1,7 @@
 ﻿# Codex Project Handoff: co-Stroke
 
+> **Historical note:** This handoff captures the repository on 2026-06-01 and is not current operational documentation. The project now uses a real local PyTorch inference service with a multimodal v4.1 checkpoint, a richer nested stroke format, and an asset synchronization script. Use `README.md`, `README.zh-CN.md`, `docs/co-stroke-json-v0.1.md`, and `schemas/co-stroke.schema.json` for the current state.
+
 Date: 2026-06-01
 Project path: `C:\Users\rog\Documents\GitHub\co-Stroke`
 
@@ -191,7 +193,7 @@ Responsibilities:
 
 ### `src/ai-adapter.js`
 
-Current AI model interface. It is currently a mock adapter.
+At the time of this historical handoff, the AI model interface was only a mock adapter. The repository has since added the local Python/PyTorch service described in the current README.
 
 This is the future connection point for the custom autoregressive stroke model.
 

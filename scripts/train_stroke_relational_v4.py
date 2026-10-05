@@ -53,6 +53,7 @@ class TrainConfig:
     lr: float = 3e-4
     weight_decay: float = 0.01
     stop_loss_weight: float = 0.25
+    start_condition_noise: float = 0.015
     seed: int = 7
     device: str = "cuda" if torch.cuda.is_available() else "cpu"
     amp: bool = True
@@ -236,6 +237,13 @@ class StrokeRelationalTransformer(nn.Module):
             ).clamp(-7.0, 1.0),
         }
 
+    def condition_shape_start(self, target_start: torch.Tensor) -> torch.Tensor:
+        """Make shape training robust to the sampled-start error seen at inference."""
+        noise = float(self.config.start_condition_noise)
+        if not self.training or noise <= 0.0:
+            return target_start
+        return (target_start + torch.randn_like(target_start) * noise).clamp(0.01, 0.99)
+
     def forward(
         self,
         context_points: torch.Tensor,
@@ -250,7 +258,12 @@ class StrokeRelationalTransformer(nn.Module):
             context_order,
             context_mask,
         )
-        return self.predict_start(context), self.predict_shape(context, target_start), self.stop_head(context).squeeze(-1)
+        conditioned_start = self.condition_shape_start(target_start)
+        return (
+            self.predict_start(context),
+            self.predict_shape(context, conditioned_start),
+            self.stop_head(context).squeeze(-1),
+        )
 
 
 def load_quickdraw_drawings(ndjson_path: Path, config: TrainConfig) -> Iterable[Sequence[Any]]:
@@ -354,20 +367,25 @@ def make_completion_example(
     if len(strokes) < 2:
         raise ValueError("Completion examples need at least two strokes")
 
-    target_index = rng.randrange(1, len(strokes))
-    if rng.random() < config.prefix_probability:
+    prefix_task = rng.random() < config.prefix_probability
+    if prefix_task:
+        # Prefix continuation requires at least one visible stroke. The random
+        # subset task below can still learn to recover canonical stroke zero.
+        target_index = rng.randrange(1, len(strokes))
         context_indices = list(range(target_index))
         if len(context_indices) > config.max_context_strokes:
             context_indices = evenly_spaced_indices(context_indices, config.max_context_strokes)
     else:
+        target_index = rng.randrange(0, len(strokes))
         available = [index for index in range(len(strokes)) if index != target_index]
         count = rng.randint(1, min(len(available), config.max_context_strokes))
         context_indices = sorted(rng.sample(available, count))
 
     context = torch.stack([strokes[index] for index in context_indices])
     target = strokes[target_index]
-    denominator = max(len(strokes) - 1, 1)
-    order = torch.tensor([index / denominator for index in context_indices], dtype=torch.float32)
+    # The completed drawing length is unknown at inference. Encode rank only
+    # within the visible context so training and serving use the same feature.
+    order = relative_context_order(len(context_indices))
 
     # Source labels are deliberately randomized during synthetic training. The
     # geometry is the supervision; this prevents an untrained author embedding
@@ -386,8 +404,25 @@ def make_completion_example(
         "context_order": order,
         "target_start": target[0],
         "target_shape": target[1:] - target[0],
-        "target_stop": torch.tensor(float(target_index == len(strokes) - 1)),
+        # For arbitrary subsets, canonical source order is not completion
+        # state. The drawing is complete only when every other stroke is
+        # already visible. Prefix tasks retain the conventional final-stroke
+        # target used by autoregressive continuation.
+        "target_stop": torch.tensor(float(
+            target_index == len(strokes) - 1
+            if prefix_task
+            else len(context_indices) == len(strokes) - 1
+        )),
     }
+
+
+def relative_context_order(stroke_count: int) -> torch.Tensor:
+    """Return inference-available chronological ranks in the range [0, 1]."""
+    if stroke_count <= 0:
+        return torch.zeros((0,), dtype=torch.float32)
+    if stroke_count == 1:
+        return torch.zeros((1,), dtype=torch.float32)
+    return torch.linspace(0.0, 1.0, stroke_count, dtype=torch.float32)
 
 
 def collate_batch(examples: list[dict[str, torch.Tensor]]) -> dict[str, torch.Tensor]:
@@ -524,29 +559,51 @@ def sample_bivariate_gmm(
     epsilon_y = torch.randn_like(mu_y)
     x = mu_x + sigma_x * epsilon_x
     y = mu_y + sigma_y * (rho * epsilon_x + torch.sqrt((1.0 - rho.square()).clamp_min(1e-5)) * epsilon_y)
-    probability = F.log_softmax(logits, dim=-1).gather(1, gather).squeeze(1)
+    one_minus_rho_sq = (1.0 - rho.square()).clamp_min(1e-5)
+    normalized_y = (y - mu_y) / sigma_y
+    exponent = (
+        epsilon_x.square()
+        + normalized_y.square()
+        - 2.0 * rho * epsilon_x * normalized_y
+    ) / one_minus_rho_sq
+    component_log_density = (
+        -math.log(2.0 * math.pi)
+        - sigma_x.log()
+        - sigma_y.log()
+        - 0.5 * one_minus_rho_sq.log()
+        - 0.5 * exponent
+    )
+    component_log_weight = F.log_softmax(logits, dim=-1).gather(1, gather).squeeze(1)
+    probability = component_log_weight + component_log_density
     return torch.stack((x, y), dim=-1).clamp(0.01, 0.99), probability
 
 
 def sample_shape_gmm(
     distribution: dict[str, torch.Tensor],
     temperature: float,
+    *,
+    residual_noise: float = 0.0,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     temperature = max(float(temperature), 1e-3)
     logits = distribution["pi_logits"] / temperature
     component = torch.distributions.Categorical(logits=logits).sample()
     batch_indices = torch.arange(component.shape[0], device=component.device)
     mean = distribution["mean"][batch_indices, component]
-    # The mixture component already supplies most of the useful multimodality.
-    # Full independent noise at every control point makes a decoded stroke
-    # jagged, so keep only a small residual around the learned component mean.
-    sigma = (
-        distribution["log_sigma"][batch_indices, component].exp()
-        * math.sqrt(temperature)
-        * 0.20
+    # Keep diversity between complete shapes, not independent jitter between
+    # neighboring points. Score using the learned distribution even when its
+    # mean is decoded; a zero sampling variance is not a density estimate.
+    sigma = distribution["log_sigma"][batch_indices, component].exp()
+    noise = torch.randn_like(mean)  # Stable RNG consumption for ablations.
+    sample = mean + sigma * math.sqrt(temperature) * residual_noise * noise
+    normalized = (sample - mean) / sigma.clamp_min(1e-8)
+    coordinate_log_density = (
+        -0.5 * normalized.square()
+        - sigma.clamp_min(1e-8).log()
+        - 0.5 * math.log(2.0 * math.pi)
     )
-    sample = mean + sigma * torch.randn_like(mean)
-    probability = F.log_softmax(logits, dim=-1)[batch_indices, component]
+    dimensions = max(sample.shape[-2] * sample.shape[-1], 1)
+    component_log_weight = F.log_softmax(logits, dim=-1)[batch_indices, component]
+    probability = (component_log_weight + coordinate_log_density.sum(dim=(-1, -2))) / dimensions
     return sample, probability
 
 
@@ -709,6 +766,7 @@ def parse_args() -> TrainConfig:
     parser.add_argument("--lr", type=float, default=3e-4)
     parser.add_argument("--weight-decay", type=float, default=0.01)
     parser.add_argument("--stop-loss-weight", type=float, default=0.25)
+    parser.add_argument("--start-condition-noise", type=float, default=0.015)
     parser.add_argument("--seed", type=int, default=7)
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--no-amp", action="store_true")
@@ -732,6 +790,7 @@ def parse_args() -> TrainConfig:
         lr=args.lr,
         weight_decay=args.weight_decay,
         stop_loss_weight=args.stop_loss_weight,
+        start_condition_noise=args.start_condition_noise,
         seed=args.seed,
         device=args.device,
         amp=not args.no_amp,

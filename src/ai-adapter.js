@@ -1,5 +1,33 @@
 ﻿import { createStroke } from "./stroke-format.js";
 
+export function resolveModelEndpoint({
+  location = globalThis.location ?? {},
+  config = globalThis.CO_STROKE_CONFIG ?? {}
+} = {}) {
+  const localPage = ["localhost", "127.0.0.1", "::1", "[::1]"].includes(location.hostname);
+  const override = new URLSearchParams(location.search ?? "").get("api");
+  const baseUrl = override ?? config.modelApiBaseUrl ?? "";
+  if (typeof baseUrl !== "string") throw new Error("The AI connection address is invalid.");
+  if (!baseUrl.trim()) return localPage ? "http://127.0.0.1:8787/continue" : null;
+  let url;
+  try {
+    url = new URL(baseUrl);
+  } catch {
+    throw new Error("The AI connection address is invalid.");
+  }
+  if (!["http:", "https:"].includes(url.protocol) || url.username || url.password) {
+    throw new Error("The AI connection needs an HTTP or HTTPS address without credentials.");
+  }
+  if ((!localPage || location.protocol === "https:") && url.protocol !== "https:") {
+    throw new Error("This page needs an HTTPS AI connection.");
+  }
+  if (url.search || url.hash) {
+    throw new Error("The AI connection address must not contain a query or fragment.");
+  }
+  url.pathname = `${url.pathname.replace(/\/+$/, "")}/continue`;
+  return url.href;
+}
+
 export class MockStrokeModelAdapter {
   constructor() {
     this.name = "mock-autoregressive-stroke-model";
@@ -34,31 +62,45 @@ export class MockStrokeModelAdapter {
 }
 
 export class LocalStrokeModelAdapter {
-  constructor({ endpoint = "http://127.0.0.1:8787/continue", fallback = new MockStrokeModelAdapter() } = {}) {
+  constructor({ endpoint = resolveModelEndpoint(), fallback = null, timeoutMs = 30000 } = {}) {
     this.endpoint = endpoint;
     this.fallback = fallback;
+    this.timeoutMs = timeoutMs;
   }
 
   async continue(request) {
+    if (!this.endpoint) throw new Error("AI is not connected yet. Drawing and replay are available.");
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
     try {
       const response = await fetch(this.endpoint, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(request)
+        body: JSON.stringify(request),
+        signal: controller.signal
       });
 
       if (!response.ok) {
-        throw new Error(`Local model server returned ${response.status}`);
+        throw new Error(`AI service returned ${response.status}. Please try again.`);
       }
 
       const result = await response.json();
       if (!Array.isArray(result.strokes)) {
-        throw new Error("Local model response did not include strokes.");
+        throw new Error("The AI service returned an invalid drawing response.");
+      }
+      if (result.strokes.some((stroke) => !Array.isArray(stroke?.points)
+        || stroke.points.length < 2
+        || stroke.points.some((point) => !Number.isFinite(point.x) || !Number.isFinite(point.y)))) {
+        throw new Error("The AI service returned invalid stroke coordinates.");
       }
       return result;
     } catch (error) {
-      console.warn("Local stroke model unavailable; using mock continuation.", error);
-      return this.fallback.continue(request);
+      if (this.fallback) return this.fallback.continue(request);
+      if (error.name === "AbortError") throw new Error("AI took too long to respond. Please try again.");
+      if (error instanceof TypeError) throw new Error("AI is unavailable. Your drawing is still here; please try again later.");
+      throw error;
+    } finally {
+      clearTimeout(timeout);
     }
   }
 }

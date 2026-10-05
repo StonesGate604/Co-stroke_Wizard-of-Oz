@@ -3,6 +3,7 @@ from __future__ import annotations
 import math
 import sys
 import unittest
+from dataclasses import asdict
 from pathlib import Path
 
 import torch
@@ -14,13 +15,47 @@ sys.path.insert(0, str(ROOT / "scripts"))
 from train_stroke_multimodal_v41 import (  # noqa: E402
     StrokeMultimodalV41,
     TrainConfig,
+    cosine_lr_multiplier,
     multimodal_loss,
     rasterize_context,
     sample_v41_stroke,
 )
+from serve_stroke_model import StrokeMultimodalV41Runtime  # noqa: E402
+from evaluate_stroke_model import make_drawing, sample_candidate_set, seed_sampling  # noqa: E402
 
 
 class StrokeMultimodalV41Tests(unittest.TestCase):
+    def test_serving_matches_evaluation_and_excludes_future_strokes(self) -> None:
+        config = TrainConfig(data="unused", d_model=24, layers=1, heads=3,
+            points_per_stroke=4, mixtures=3, raster_size=16, dropout=0.0)
+        model = StrokeMultimodalV41(config)
+        runtime = StrokeMultimodalV41Runtime(
+            {"config": asdict(config), "model": model.state_dict(), "epoch": 0},
+            Path("unused.pt"), "cpu")
+        drawing = make_drawing([
+            torch.tensor([[0.2, 0.2], [0.4, 0.1], [0.6, 0.2], [0.6, 0.5]]),
+            torch.tensor([[0.3, 0.4], [0.31, 0.41], [0.32, 0.4], [0.3, 0.4]]),
+        ])
+        selected, _ = sample_candidate_set(runtime, drawing,
+            candidate_count=16, temperature=0.55, seed=73)
+        # The browser sends a full timeline; hidden future ink must stay hidden.
+        drawing["strokes"].append({"author": {"type": "ai"}, "tool": "pen",
+            "points": [{"x": 0.9, "y": 0.9}, {"x": 0.95, "y": 0.9}]})
+        seed_sampling(73, runtime.device)
+        response = runtime.continue_drawing(drawing, 2, steps=64,
+            temperature=0.55, max_strokes=1, max_points_per_stroke=4, style=None)
+        self.assertEqual(response["strokes"][0]["points"], selected["points"])
+        self.assertEqual(response["context"]["visibleStrokes"], 2)
+        self.assertEqual(response["context"]["samplingPolicy"], "stroke-shape-quality-v1")
+        self.assertEqual(response["context"]["rasterPolicy"], "full-visible-history-v1")
+
+    def test_cosine_schedule_preserves_parameter_group_ratio(self) -> None:
+        multipliers = [cosine_lr_multiplier(epoch, 12) for epoch in (0, 6, 12)]
+        self.assertAlmostEqual(multipliers[0], 1.0)
+        self.assertAlmostEqual(multipliers[-1], 0.1)
+        self.assertGreater(multipliers[0], multipliers[1])
+        self.assertGreater(multipliers[1], multipliers[2])
+
     def test_raster_channels_encode_all_ai_and_latest_human(self) -> None:
         points = torch.tensor([
             [[0.10, 0.15], [0.20, 0.15], [0.30, 0.15]],
