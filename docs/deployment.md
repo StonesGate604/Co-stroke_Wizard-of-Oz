@@ -1,6 +1,12 @@
 # 独立部署说明
 
-截至 2026-10-31：用户选择先交付代码和 GitHub Pages 前端，**本次不执行云端后端部署**。以下脚本供之后明确要求部署时使用。
+截至 2026-10-31：用户在先交付前端后，授权通过 CLI 继续。独立 Cloud Run 服务和 Firestore 已部署。以下步骤可用于复现或后续更新。
+
+- 前端：`https://stonesgate604.github.io/Co-stroke_Wizard-of-Oz/`
+- 后端：`https://co-stroke-woz-3u67uf7ieq-uc.a.run.app`
+- 项目/区域：`connect-491721` / `us-central1`
+- 数据库/服务：`co-stroke-woz`
+- 创建会话的管理员密钥只保存在部署机器的忽略文件 `.woz-admin.secret`。
 
 ## GitHub Pages
 
@@ -12,7 +18,7 @@
 
 不要在原 `co-Stroke` 仓库设置 Pages 或添加新的部署工作流。构建目录仅复制 `public/`、`src/`、`schemas/`、`data/examples/`，不复制会话状态、服务端、密钥、Python 模型或权重。根入口保留 URL fragment 再跳转至 `public/`。
 
-当前 `public/config.js` 的 `syncServerUrl` 为空，页面显示会话设置表单。它是已发布的前端，不代表公网双人协作已经部署完成。
+`public/config.js` 的 `syncServerUrl` 已指向独立后端。入口显示会话设置表单，研究者使用管理员密钥创建一对角色链接；收到角色链接的用户直接进入画布。
 
 ## 后端部署前检查
 
@@ -28,7 +34,7 @@ gcloud run services describe co-stroke-model --project=connect-491721 --region=u
 
 创建资源需要 Cloud Run 管理、构建/Artifact Registry、数据库创建、服务账号创建、绑定 IAM、启用 API 等权限。当前账号通过官方权限接口确认了部分创建/更新权限，见 `architecture-audit.md`；Cloud Build 的服务账号、配额、组织策略与结算需在实际部署时再次核对。若 source build 报权限不足，只为错误中指明的构建身份补充必要角色，不改原模型服务运行账号。
 
-## 执行独立部署（之后再运行）
+## 首次执行独立部署
 
 仓库根目录，PowerShell 7：
 
@@ -60,7 +66,7 @@ WebSocket 连接和 Firestore 读写会计费，预览亦产生写入。当前�
 
 也可在受控终端中通过环境变量设置 `ADMIN_TOKEN`、`WOZ_SERVER`、`WOZ_FRONTEND`，运行 `npm run session`。输出的角色链接是访问凭据，不要提交。
 
-## 云端验收（尚未执行）
+## 云端验收与复测
 
 1. 两台不同电脑分别打开角色链接，验证人类笔画、AI 请求、Wizard 回应与结束回合同步。
 2. 测试橡皮、示例加载、回退、Undo、清空、共享回放与 JSON 导出。
@@ -71,7 +77,11 @@ WebSocket 连接和 Firestore 读写会计费，预览亦产生写入。当前�
 7. 在测试环境临时允许 2 个实例并强制不同实例接入，验证 Firestore 事务/监听同步后再恢复 1。
 8. 核对原服务就绪版本仍为部署前记录值；原 Pages 页面仍可访问。
 
-仅本地文件存储的测试通过，不等于已经通过 Firestore、真实 Cloud Run 滚动更新和双机公网验收。
+验收完成情况见 `acceptance.md`。公网双客户端测试与不同实体电脑/不同网络的人工实验需要分别记录。
+
+自动复测使用 `npm run test:cloud`。它只针对显式指定的 HTTPS 后端创建临时会话，凭据与恢复基线保存到忽略文件 `.woz-cloud-test.secret`。设置 `WOZ_PHASE=verify` 验证版本更新后的恢复；`WOZ_PHASE=timeout` 配合新建的短超时测试版本，验证前端 `SessionClient` 自动重连；`WOZ_PHASE=cross` 与 `WOZ_PEER_SERVER` 配合两个不同版本入口，验证跨实例同步。不要在实际参与者的会话上运行破坏性验证。
+
+本次 Firestore 和运行账号首次启用后存在短暂生效延迟，期间创建会话返回 503；等待权限传播后测试全部通过。以后若遇到 503，可在独立服务的 Cloud Logging 中查看 `http-storage-error` / `ws-storage-error`，不要放宽数据库权限到整个项目作为临时绕过。
 
 ## 会话与数据保留
 

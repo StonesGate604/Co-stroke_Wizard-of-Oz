@@ -8,6 +8,7 @@ import { FileStore, FirestoreStore } from './store.js';
 import { authenticate, claim, requireLease, makeSession, applyOperation, publicState, cleanStroke, fail, LEASE_MS } from './session.js';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
+const instanceId = randomBytes(8).toString('hex');
 const validSession = id => typeof id === 'string' && /^[a-f0-9]{32}$/.test(id);
 export async function createServer({ store, adminToken = '', allowedOrigins = [], cloud = false } = {}) {
   if (cloud && (!adminToken || !allowedOrigins.length)) throw new Error('Cloud Run requires ADMIN_TOKEN and ALLOWED_ORIGINS.');
@@ -27,7 +28,7 @@ export async function createServer({ store, adminToken = '', allowedOrigins = []
       const url = new URL(req.url, 'http://localhost');
       if (url.pathname === '/health') {
         res.setHeader('Content-Type', 'application/json');
-        res.end(JSON.stringify({ ok: true, service: 'co-stroke-woz', storage: store instanceof FirestoreStore ? 'firestore' : 'local-file' })); return;
+        res.end(JSON.stringify({ ok: true, service: 'co-stroke-woz', storage: store instanceof FirestoreStore ? 'firestore' : 'local-file', revision: process.env.K_REVISION || 'local', instanceId })); return;
       }
       if (req.method === 'POST' && url.pathname === '/sessions') {
         if (adminToken ? req.headers.authorization !== `Bearer ${adminToken}` : cloud || !['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(req.socket.remoteAddress)) {
@@ -47,7 +48,10 @@ export async function createServer({ store, adminToken = '', allowedOrigins = []
         res.end(body); return;
       }
       res.writeHead(404); res.end();
-    } catch (e) { res.writeHead(e.code === 'ENOENT' ? 404 : 503); res.end('Service unavailable'); }
+    } catch (e) {
+      if (e.code !== 'ENOENT') console.error(JSON.stringify({event:'http-storage-error',code:e.code,name:e.name,message:String(e.message).slice(0,500)}));
+      res.writeHead(e.code === 'ENOENT' ? 404 : 503); res.end('Service unavailable');
+    }
   });
   const wss = new WebSocketServer({ noServer: true, maxPayload: 180000 });
   server.on('upgrade', (req, socket, head) => {
@@ -104,6 +108,7 @@ export async function createServer({ store, adminToken = '', allowedOrigins = []
       } catch (e) {
         busy = false;
         const protocolError = ['auth','invalid','occupied','replaced','conflict','turn','capacity','rate'].includes(e.code);
+        if (!protocolError) console.error(JSON.stringify({event:'ws-storage-error',code:e.code,name:e.name,message:String(e.message).slice(0,500)}));
         send(ws, { type: 'error', code: protocolError ? e.code : 'storage', message: protocolError ? e.message : 'Storage unavailable. Reconnect to check whether your action was saved.', id: message?.op?.id });
         if (!identity || e.code === 'replaced' || !protocolError) ws.close(1011, 'Reconnect required');
         else if (identity) { try { const r = await store.read(identity.session); if (r) observe(r); } catch {} }

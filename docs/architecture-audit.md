@@ -30,7 +30,7 @@ Google Cloud 项目 `connect-491721`（Myserver）有现有服务：
 
 GitHub 连接返回原仓库 admin/push 权限。Google Cloud 官方 `testIamPermissions` 接口确认当前账号具备 `run.services.create`、`run.services.update`、`datastore.databases.create`、`iam.serviceAccounts.create`、`resourcemanager.projects.setIamPolicy`、`serviceusage.services.enable`。这不是对尚未创建资源、构建配额、组织策略或结算可用性的保证。
 
-用户随后明确要求暂不部署云端。未创建或修改 Cloud Run、Firestore、IAM、API 开关或计费资源。
+用户先要求暂缓云部署，随后在同日明确授权使用 CLI 继续。本次只为 WoZ 创建独立 Cloud Run 服务 `co-stroke-woz`、同名 Firestore Native 数据库和专用账号 `co-stroke-woz-runtime`。数据库位于 `us-central1`，开启删除保护；账号通过 IAM 条件只获得该数据库的数据权限。启用了本原型所需 API，没有修改原模型服务的运行账号、流量、版本或配置。
 
 ## 隔离措施
 

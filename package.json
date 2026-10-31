@@ -6,6 +6,7 @@
   "scripts": {
     "start": "node server/index.js",
     "test": "node --test tests/woz*.test.js",
+    "test:cloud": "node scripts/smoke-cloud.js",
     "build": "node scripts/build-woz.js",
     "session": "node scripts/create-session.js"
   },

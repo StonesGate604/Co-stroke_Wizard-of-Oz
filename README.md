@@ -11,7 +11,7 @@ Participant 使用原有绘画页面；Wizard 在另一浏览器中模拟 AI。*
 - Participant 点击 **AI Continue**，Wizard 显示明确请求提示并可手绘多笔；点击 **Finish AI turn** 归还绘画权。
 - Wizard 笔画由服务器强制标为 `ai`，粉色显示；Participant 页面不含 Wizard 控件。
 - 自动重连、刷新恢复、角色占用检查、版本冲突拒绝、操作去重与持久化后确认。
-- 按用户 2026-10-31 的最新要求，**暂不部署 Cloud Run 后端**。Pages 入口可访问；双机公网协作待独立后端部署后验收。
+- 已独立部署 GitHub Pages、Cloud Run 和 Firestore。公网双客户端自动测试已通过；实际测试记录见 `docs/acceptance.md`。
 
 ## 本地运行
 

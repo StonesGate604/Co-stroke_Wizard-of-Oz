@@ -22,8 +22,14 @@ $existing = & gcloud run services list --project=$ProjectId --region=$Region --f
 if ($LASTEXITCODE -ne 0) { throw 'Cannot inspect existing services.' }
 if ($existing -and !$Update) { throw 'co-stroke-woz already exists. Inspect it first, then explicitly pass -Update.' }
 Invoke-Gcloud services enable run.googleapis.com cloudbuild.googleapis.com artifactregistry.googleapis.com firestore.googleapis.com --project=$ProjectId --quiet
-$databases = & gcloud firestore databases list --project=$ProjectId --format='value(name)'
-if ($LASTEXITCODE -ne 0) { throw 'Cannot inspect Firestore databases.' }
+$databases = $null
+for ($attempt = 0; $attempt -lt 6; $attempt++) {
+    $databases = & gcloud firestore databases list --project=$ProjectId --format='value(name)' --quiet
+    if ($LASTEXITCODE -eq 0) { break }
+    if ($attempt -eq 5) { throw 'Cannot inspect Firestore databases after waiting for API activation.' }
+    Write-Output 'Waiting for Firestore API activation...'
+    Start-Sleep -Seconds 10
+}
 if ($databases -notcontains "projects/$ProjectId/databases/$database") {
     Invoke-Gcloud firestore databases create --project=$ProjectId --database=$database --location=$Region --type=firestore-native --delete-protection --quiet
 }
@@ -31,7 +37,12 @@ $accounts = & gcloud iam service-accounts list --project=$ProjectId --filter="em
 if ($LASTEXITCODE -ne 0) { throw 'Cannot inspect runtime accounts.' }
 if (!$accounts) { Invoke-Gcloud iam service-accounts create $accountId --project=$ProjectId --display-name='Independent co-Stroke WoZ runtime' --quiet }
 $condition = 'expression=resource.name=="projects/' + $ProjectId + '/databases/' + $database + '",title=woz-database-only'
-Invoke-Gcloud projects add-iam-policy-binding $ProjectId --member="serviceAccount:$account" --role=roles/datastore.user --condition=$condition --quiet --format='none'
+for ($attempt = 0; $attempt -lt 4; $attempt++) {
+    & gcloud projects add-iam-policy-binding $ProjectId --member="serviceAccount:$account" --role=roles/datastore.user --condition=$condition --quiet --format='none'
+    if ($LASTEXITCODE -eq 0) { break }
+    if ($attempt -eq 3) { throw 'Cannot grant the runtime account access to the dedicated database.' }
+    Start-Sleep -Seconds ([int][Math]::Pow(2,$attempt + 1))
+}
 $secretFile = Join-Path $repoRoot '.woz-admin.secret'
 if (!(Test-Path -LiteralPath $secretFile)) {
     $secret = [Convert]::ToBase64String([System.Security.Cryptography.RandomNumberGenerator]::GetBytes(32))

@@ -10,4 +10,4 @@ This is an independent Node.js prototype, derived from co-Stroke at f17cc2162eeb
 - Cloud Run must use Firestore; local file snapshots are only for one-process development.
 - ACK only after durable transaction; do not auto-rebase stale destructive edits.
 - Do not commit session links, .woz-data, .env, *.secret or cloud credentials.
-- Cloud backend deployment was deferred by the user on 2026-10-31. Do not deploy it without a new request.
+- The user authorized continuing the independent Cloud Run backend deployment with the CLI on 2026-10-31, after the earlier deferral. Only deploy this WoZ service and its dedicated storage/account.
