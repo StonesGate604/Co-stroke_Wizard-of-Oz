@@ -1,4 +1,3 @@
-﻿@import url("https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@300;400;500&family=IBM+Plex+Sans:wght@300;400;500&display=swap");
 
 :root {
   --bg: #1a1a1a;
@@ -19,6 +18,19 @@
   --hover: #2f2f2f;
   --active: #383838;
 }
+
+[hidden] { display: none !important; }
+#roleStat, #connectionStat { font-size: 11px; margin-left: 10px; }
+#connectionStat { color: var(--accent2); }
+#controls label { display: block; font-size: 12px; margin-bottom: 10px; }
+#controls input { width: 100%; padding: 6px; margin-top: 5px; background: #111; color: #ddd; border: 1px solid #555; border-radius: 4px; }
+#sessionLinks { display: grid; gap: 6px; margin-top: 10px; }
+#sessionLinks a { color: var(--accent); font-size: 12px; }
+#turnNotice { padding: 10px; margin: 10px 0; border: 2px solid var(--ai); color: #ff91ce; font-size: 13px; }
+#errorStat { color: #ffbd69; }
+#finishButton, #cancelButton { margin-top: 8px; }
+.tl-track.readonly { pointer-events: none; opacity: .65; }
+#drawingCanvas.unavailable { cursor: wait; }
 
 * {
   box-sizing: border-box;

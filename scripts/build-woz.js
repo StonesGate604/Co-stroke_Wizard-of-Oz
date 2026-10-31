@@ -1,0 +1,10 @@
+import { cp, mkdir, writeFile } from 'node:fs/promises';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+const root = fileURLToPath(new URL('../',import.meta.url));
+const out = path.join(root,'.pages-build');
+await mkdir(out,{recursive:true});
+for (const dir of ['public','src','schemas','data/examples']) await cp(path.join(root,dir),path.join(out,dir),{recursive:true});
+await writeFile(path.join(out,'index.html'),'<!doctype html><html><head><meta charset="utf-8"><title>Co-stroke_Wizard of Oz</title></head><body><a href="./public/">Open co-Stroke</a><script>location.replace("./public/"+location.search+location.hash)</script></body></html>');
+await writeFile(path.join(out,'.nojekyll'),'');
+console.log('Built independent frontend:',out);

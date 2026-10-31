@@ -10,10 +10,12 @@
     canvas.addEventListener("pointermove", (event) => this.move(event));
     window.addEventListener("pointerup", (event) => this.end(event));
     canvas.addEventListener("pointerleave", (event) => this.end(event));
+    canvas.addEventListener("pointercancel", () => this.cancel());
   }
 
   start(event) {
-    if (event.button !== 0) return;
+    if (event.button !== 0 || this.isDrawing || this.callbacks.canStart?.() === false) return;
+    this.callbacks.onStart?.();
     this.isDrawing = true;
     this.startedAt = performance.now();
     this.points = [this.eventToPoint(event)];
@@ -49,6 +51,13 @@
       t: Math.max(0, Math.round(performance.now() - this.startedAt)),
       p: typeof event.pressure === "number" && event.pressure > 0 ? event.pressure : 0.5
     };
+  }
+
+  cancel() {
+    if (!this.isDrawing) return;
+    this.isDrawing = false;
+    this.points = [];
+    this.callbacks.onCancel?.();
   }
 }
 

@@ -1,37 +1,29 @@
-name: Deploy drawing interface to GitHub Pages
-
+name: Test and deploy independent WoZ frontend
 on:
   push:
-    branches: [master]
-    paths:
-      - public/**
-      - src/**
-      - data/examples/**
-      - schemas/**
-      - scripts/build_pages.ps1
-      - .github/workflows/pages.yml
+    branches: [main]
   workflow_dispatch:
-
 permissions:
   contents: read
-
 concurrency:
-  group: pages
+  group: woz-pages
   cancel-in-progress: true
-
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - run: npm test
+      - run: npm run build
       - uses: actions/configure-pages@v5
-      - name: Prepare static application assets
-        shell: pwsh
-        run: ./scripts/build_pages.ps1
       - uses: actions/upload-pages-artifact@v4
         with:
           path: .pages-build
-
   deploy:
     needs: build
     runs-on: ubuntu-latest
@@ -42,6 +34,5 @@ jobs:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
-      - name: Publish site
+      - uses: actions/deploy-pages@v4
         id: deployment
-        uses: actions/deploy-pages@v4

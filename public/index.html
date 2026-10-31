@@ -3,8 +3,9 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="no-referrer">
   <title>co-Stroke</title>
-  <script src="https://cdn.jsdelivr.net/npm/lucide@latest/dist/umd/lucide.min.js"></script>
+  <script src="./vendor/lucide.min.js"></script>
   <link rel="stylesheet" href="../src/styles.css">
 </head>
 <body>
@@ -14,6 +15,7 @@
     <button class="top-btn" id="exportButton" title="Export JSON"><i data-lucide="download"></i> Export</button>
     <button class="top-btn" id="undoButton" title="Undo latest stroke"><i data-lucide="undo-2"></i> Undo</button>
     <button class="top-btn" id="clearButton" title="Clear drawing"><i data-lucide="trash-2"></i> Clear</button>
+    <span id="roleStat"></span><span id="connectionStat" role="status" aria-live="polite">Connecting…</span>
   </div>
 
   <div id="toolbar">
@@ -30,6 +32,14 @@
   </main>
 
   <aside id="controls">
+    <section id="setupPanel" class="panel-section" hidden>
+      <div class="section-title">New shared session</div>
+      <label>Sync server<input id="backendInput" type="url" placeholder="https://your-service.run.app"></label>
+      <label>Admin key<input id="adminInput" type="password" autocomplete="off"></label>
+      <button id="createSessionButton" class="action-btn">Create session</button>
+      <div id="sessionLinks"></div>
+      <p class="hint-text">Send each person only their own link. Links grant access to this session.</p>
+    </section>
     <section class="panel-section">
       <div class="section-title">Stroke Style</div>
       <div class="style-legend">
@@ -51,8 +61,13 @@
     <section class="panel-section">
       <div class="section-title">AI Continuation</div>
       <button class="action-btn" id="aiStepButton"><i data-lucide="sparkles"></i> AI Continue</button>
-      <div class="context-stat" id="contextStat" role="status" aria-live="polite">Checking AI connection…</div>
-      <div class="hint-text">Your strokes take priority. Add a stroke to guide the next AI contribution.</div>
+      <div id="turnNotice" role="alert" tabindex="-1" hidden></div>
+      <button class="action-btn" id="finishButton" hidden>Finish AI turn</button>
+      <button class="action-btn" id="cancelButton" hidden>Cancel AI request</button>
+      <div class="context-stat" id="contextStat" role="status" aria-live="polite">Open a shared session to begin.</div>
+      <div class="hint-text" id="presenceStat"></div>
+      <div class="hint-text" id="errorStat" role="alert"></div>
+      <button class="action-btn" id="draftButton" hidden>Save unsent stroke</button>
     </section>
   </aside>
 

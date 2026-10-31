@@ -1,0 +1,8 @@
+.git
+node_modules
+.woz-data
+.env
+*.secret
+.pages-build
+work
+test-results

@@ -12,3 +12,8 @@ data/downloads/
 
 .DS_Store
 Thumbs.db
+node_modules/
+.woz-data/
+.env
+*.secret
+test-results/
